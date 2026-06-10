@@ -2292,39 +2292,61 @@ function renderSetRoles(){
     }).join('')}`;
 }
 
-function renderSetPartners(){
-  const totalShares=db.partners.reduce((s,p)=>s+p.share,0);
-  // Compute real monthly profit from finance ledger
+// ══════════════════════════════════════════════════════════════
+//  PARTNER helper — compute per-partner cumulative profit share
+// ══════════════════════════════════════════════════════════════
+function getPartnerStats(p){
+  // All-time net profit from finance
+  const inc=db.finance.filter(x=>x.type==='income').reduce((s,x)=>s+x.amount,0);
+  const exp=db.finance.filter(x=>x.type==='expense'&&x.cat!=='dividend'&&x.cat!=='withdrawal').reduce((s,x)=>s+x.amount,0);
+  const netProfit=Math.max(0,inc-exp);
+  const totalDivShare=parseFloat((netProfit*p.share/100).toFixed(2));
+  const totalWithdrawn=(db.cash.ledger||[]).filter(e=>e.src==='withdrawal'&&e.partnerId===p.id).reduce((s,e)=>s+e.amount,0);
+  const totalContributed=(db.cash.ledger||[]).filter(e=>e.src==='contribution'&&e.partnerId===p.id).reduce((s,e)=>s+e.amount,0);
+  const available=parseFloat((totalDivShare - totalWithdrawn).toFixed(2));
+  // monthly
   const monthStart=new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString().slice(0,10);
-  const inc=db.finance.filter(x=>x.type==='income'&&x.date>=monthStart).reduce((s,x)=>s+x.amount,0);
-  const exp=db.finance.filter(x=>x.type==='expense'&&x.date>=monthStart&&x.cat!=='dividend'&&x.cat!=='withdrawal').reduce((s,x)=>s+x.amount,0);
-  const monthlyProfit=Math.max(0,inc-exp);
-  // ensure withdrawals array on each partner
+  const mInc=db.finance.filter(x=>x.type==='income'&&x.date>=monthStart).reduce((s,x)=>s+x.amount,0);
+  const mExp=db.finance.filter(x=>x.type==='expense'&&x.date>=monthStart&&x.cat!=='dividend'&&x.cat!=='withdrawal').reduce((s,x)=>s+x.amount,0);
+  const monthlyProfit=Math.max(0,mInc-mExp);
+  const monthlyDiv=parseFloat((monthlyProfit*p.share/100).toFixed(2));
+  return{netProfit,totalDivShare,totalWithdrawn,totalContributed,available,monthlyProfit,monthlyDiv};
+}
+
+function renderSetPartners(){
+  const cur=db.settings.currency;
+  const totalShares=db.partners.reduce((s,p)=>s+p.share,0);
   db.partners.forEach(p=>{if(!p.withdrawals)p.withdrawals=[];if(p.availableBalance===undefined)p.availableBalance=0;});
+  const {netProfit,monthlyProfit}=db.partners.length?getPartnerStats(db.partners[0]):{netProfit:0,monthlyProfit:0};
+  // recompute totals independently
+  const inc=db.finance.filter(x=>x.type==='income').reduce((s,x)=>s+x.amount,0);
+  const exp=db.finance.filter(x=>x.type==='expense'&&x.cat!=='dividend'&&x.cat!=='withdrawal').reduce((s,x)=>s+x.amount,0);
+  const mInc=db.finance.filter(x=>x.type==='income'&&x.date>=new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString().slice(0,10)).reduce((s,x)=>s+x.amount,0);
+  const mExp=db.finance.filter(x=>x.type==='expense'&&x.date>=new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString().slice(0,10)&&x.cat!=='dividend'&&x.cat!=='withdrawal').reduce((s,x)=>s+x.amount,0);
+  const realNet=Math.max(0,inc-exp);
+  const realMonth=Math.max(0,mInc-mExp);
 
   document.getElementById('set-view').innerHTML=`
     <div class="page-head">
       <span class="page-title"><i class="ti ti-briefcase"></i>Partners &amp; dividends</span>
       <button class="btn" onclick="openPartnerModal()"><i class="ti ti-plus"></i>Add partner</button>
     </div>
-
-    <!-- Profit summary strip -->
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:9px;margin-bottom:14px">
-      <div class="sc sc-green"><div class="sl">This month income</div><div class="sv" style="color:var(--green);font-size:16px">${db.settings.currency}${inc.toFixed(0)}</div></div>
-      <div class="sc sc-red"><div class="sl">This month expenses</div><div class="sv" style="color:var(--red);font-size:16px">${db.settings.currency}${exp.toFixed(0)}</div></div>
-      <div class="sc sc-accent"><div class="sl">Net profit (distributable)</div><div class="sv" style="color:var(--ac);font-size:16px">${db.settings.currency}${monthlyProfit.toFixed(0)}</div></div>
+      <div class="sc sc-green"><div class="sl">All-time net profit</div><div class="sv" style="color:var(--green);font-size:16px">${cur}${realNet.toFixed(0)}</div></div>
+      <div class="sc sc-accent"><div class="sl">This month profit</div><div class="sv" style="color:var(--ac);font-size:16px">${cur}${realMonth.toFixed(0)}</div></div>
       <div class="sc sc-amber"><div class="sl">Total shares</div><div class="sv" style="color:var(--amber);font-size:16px">${totalShares}%</div></div>
+      <div class="sc sc-purple"><div class="sl">Partners</div><div class="sv" style="color:var(--purple);font-size:16px">${db.partners.length}</div></div>
     </div>
-
-    <!-- Partner cards -->
+    <div class="info-banner" style="background:var(--acl);margin-bottom:14px">
+      <i class="ti ti-building-bank" style="font-size:15px"></i>
+      Partner contributions and withdrawals are recorded in the <strong>Cash Account</strong> module.
+      Available balance = cumulative profit share − total withdrawals.
+    </div>
     ${db.partners.map(p=>{
-      const div=parseFloat((monthlyProfit*p.share/100).toFixed(2));
-      const totalWithdrawn=(p.withdrawals||[]).reduce((s,w)=>s+w.amount,0);
-      const totalDivPaid=p.drawn||0;
-      const availBal=parseFloat((div + (p.availableBalance||0) - totalWithdrawn).toFixed(2));
+      const st=getPartnerStats(p);
       const pct=Math.min(100,p.share);
+      const cashEntries=(db.cash.ledger||[]).filter(e=>e.partnerId===p.id).slice().reverse().slice(0,5);
       return`<div class="partner-card" style="margin-bottom:12px">
-        <!-- Header -->
         <div class="partner-head">
           <div class="partner-avatar" style="width:40px;height:40px;font-size:14px">${p.nameInit}</div>
           <div style="flex:1">
@@ -2332,159 +2354,233 @@ function renderSetPartners(){
             <div class="partner-role">${p.share}% equity share</div>
           </div>
           <div style="display:flex;gap:6px;align-items:center">
-            <button class="btn btn-green" style="padding:5px 10px;font-size:11.5px" onclick="openWithdrawModal(${p.id})" title="Withdraw funds">
+            <button class="btn" style="padding:5px 10px;font-size:11.5px;background:var(--teal)" onclick="openPartnerWithdrawModal(${p.id})">
               <i class="ti ti-cash" style="font-size:13px"></i>Withdraw
             </button>
-            <button class="icon-btn" onclick="openPayDivModal(${p.id})" title="Pay dividend"><i class="ti ti-coin"></i></button>
+            <button class="btn" style="padding:5px 10px;font-size:11.5px" onclick="openPartnerContribModal(${p.id})">
+              <i class="ti ti-arrow-bar-to-down" style="font-size:13px"></i>Contribute
+            </button>
+            <button class="icon-btn" onclick="viewPartnerReport(${p.id})" title="Report"><i class="ti ti-report"></i></button>
             <button class="icon-btn del" onclick="deletePartner(${p.id})"><i class="ti ti-trash"></i></button>
           </div>
         </div>
-
-        <!-- 5 stat chips -->
         <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-bottom:10px">
-          <div class="ps">
-            <div class="ps-lbl">Invested</div>
-            <div class="ps-val">${db.settings.currency}${(p.invested||0).toLocaleString()}</div>
-          </div>
-          <div class="ps">
-            <div class="ps-lbl">This month div.</div>
-            <div class="ps-val" style="color:var(--ac)">${db.settings.currency}${div.toFixed(2)}</div>
-          </div>
-          <div class="ps">
-            <div class="ps-lbl">Total div. paid</div>
-            <div class="ps-val" style="color:var(--t2)">${db.settings.currency}${totalDivPaid.toFixed(2)}</div>
-          </div>
-          <div class="ps">
-            <div class="ps-lbl">Total withdrawn</div>
-            <div class="ps-val" style="color:var(--red)">${db.settings.currency}${totalWithdrawn.toFixed(2)}</div>
-          </div>
-          <div class="ps" style="background:${availBal>0?'var(--greenl)':'var(--redl)'};border:1px solid ${availBal>0?'#bbf7d0':'#fecaca'}">
+          <div class="ps"><div class="ps-lbl">Invested</div><div class="ps-val">${cur}${(p.invested||0).toLocaleString()}</div></div>
+          <div class="ps"><div class="ps-lbl">Profit share (all-time)</div><div class="ps-val" style="color:var(--ac)">${cur}${st.totalDivShare.toFixed(2)}</div></div>
+          <div class="ps"><div class="ps-lbl">This month div.</div><div class="ps-val" style="color:var(--green)">${cur}${st.monthlyDiv.toFixed(2)}</div></div>
+          <div class="ps"><div class="ps-lbl">Total withdrawn</div><div class="ps-val" style="color:var(--red)">${cur}${st.totalWithdrawn.toFixed(2)}</div></div>
+          <div class="ps" style="background:${st.available>=0?'var(--greenl)':'var(--redl)'};border:1px solid ${st.available>=0?'#bbf7d0':'#fecaca'}">
             <div class="ps-lbl">Available balance</div>
-            <div class="ps-val" style="color:${availBal>0?'var(--green)':'var(--red)'};font-size:15px;font-weight:700">${db.settings.currency}${availBal.toFixed(2)}</div>
+            <div class="ps-val" style="color:${st.available>=0?'var(--green)':'var(--red)'};font-size:15px;font-weight:700">${cur}${st.available.toFixed(2)}</div>
           </div>
         </div>
-
-        <!-- Share bar -->
-        <div>
+        <div style="margin-bottom:10px">
           <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--t2);margin-bottom:3px">
             <span>Equity share</span><span style="font-weight:600;color:var(--t1)">${p.share}%</span>
           </div>
           <div class="prog-bg"><div class="prog-fill" style="width:${pct}%"></div></div>
         </div>
-
-        <!-- Withdrawal history -->
-        ${(p.withdrawals||[]).length>0?`
-        <div style="margin-top:10px">
-          <div style="font-size:10.5px;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Withdrawal history</div>
-          <div style="border:1px solid var(--bd);border-radius:var(--radius);overflow:hidden">
-            <table style="margin:0">
-              <thead><tr>
-                <th style="width:80px">Date</th><th style="width:80px">Amount</th><th style="width:70px">Method</th><th>Note</th>
-              </tr></thead>
-              <tbody>${(p.withdrawals||[]).slice().reverse().slice(0,5).map(w=>`<tr>
-                <td style="font-size:11px;color:var(--t2)">${w.date}</td>
-                <td style="font-weight:600;color:var(--red)">${db.settings.currency}${w.amount.toFixed(2)}</td>
-                <td><span class="badge b-gray" style="font-size:10px">${w.method||'cash'}</span></td>
-                <td style="color:var(--t2);font-size:11px">${w.note||'—'}</td>
-              </tr>`).join('')}</tbody>
-            </table>
-          </div>
+        ${cashEntries.length>0?`
+        <div>
+          <div style="font-size:10.5px;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Recent cash activity</div>
+          <table style="font-size:11.5px">
+            <thead><tr><th style="width:80px">Date</th><th style="width:90px">Type</th><th>Description</th><th style="width:90px">Amount</th></tr></thead>
+            <tbody>${cashEntries.map(e=>`<tr>
+              <td style="color:var(--t2)">${e.date}</td>
+              <td><span class="badge ${e.type==='in'?'b-g':'b-r'}">${e.src}</span></td>
+              <td style="color:var(--t2)">${e.desc}</td>
+              <td style="font-weight:700;color:${e.type==='in'?'var(--green)':'var(--red)'}">${e.type==='in'?'+':'-'}${cur}${e.amount.toFixed(2)}</td>
+            </tr>`).join('')}</tbody>
+          </table>
         </div>`:''}
       </div>`;
     }).join('')}`;
 }
 
-function openWithdrawModal(id){
+// ── Partner Withdrawal Modal (with admin-approval for over-limit) ──────────
+function openPartnerWithdrawModal(id){
   const p=db.partners.find(x=>x.id===id);if(!p)return;
-  if(!p.withdrawals)p.withdrawals=[];
-  const monthStart=new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString().slice(0,10);
-  const inc=db.finance.filter(x=>x.type==='income'&&x.date>=monthStart).reduce((s,x)=>s+x.amount,0);
-  const expL=db.finance.filter(x=>x.type==='expense'&&x.date>=monthStart&&x.cat!=='dividend'&&x.cat!=='withdrawal').reduce((s,x)=>s+x.amount,0);
-  const monthlyProfit=Math.max(0,inc-expL);
-  const div=parseFloat((monthlyProfit*p.share/100).toFixed(2));
-  const totalWithdrawn=p.withdrawals.reduce((s,w)=>s+w.amount,0);
-  const availBal=parseFloat((div+(p.availableBalance||0)-totalWithdrawn).toFixed(2));
-
+  const st=getPartnerStats(p);
+  const cur=db.settings.currency;
   document.getElementById('g-modal-title').textContent='💰 Withdraw — '+p.name;
   document.getElementById('g-modal-body').innerHTML=`
-    <!-- Balance info -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">
       <div style="background:var(--acl);border-radius:var(--radius);padding:10px 12px;text-align:center">
-        <div style="font-size:10.5px;color:var(--t2);margin-bottom:3px">This month's dividend</div>
-        <div style="font-size:20px;font-weight:700;color:var(--ac)">${db.settings.currency}${div.toFixed(2)}</div>
+        <div style="font-size:10.5px;color:var(--t2);margin-bottom:3px">All-time profit share</div>
+        <div style="font-size:18px;font-weight:700;color:var(--ac)">${cur}${st.totalDivShare.toFixed(2)}</div>
       </div>
-      <div style="background:${availBal>=0?'var(--greenl)':'var(--redl)'};border-radius:var(--radius);padding:10px 12px;text-align:center;border:1px solid ${availBal>=0?'#bbf7d0':'#fecaca'}">
+      <div style="background:${st.available>=0?'var(--greenl)':'var(--redl)'};border-radius:var(--radius);padding:10px 12px;text-align:center;border:1px solid ${st.available>=0?'#bbf7d0':'#fecaca'}">
         <div style="font-size:10.5px;color:var(--t2);margin-bottom:3px">Available to withdraw</div>
-        <div style="font-size:20px;font-weight:700;color:${availBal>=0?'var(--green)':'var(--red)'}">${db.settings.currency}${availBal.toFixed(2)}</div>
+        <div style="font-size:20px;font-weight:700;color:${st.available>=0?'var(--green)':'var(--red)'}">${cur}${st.available.toFixed(2)}</div>
       </div>
     </div>
-
-    ${availBal<=0?`<div style="background:var(--redl);border:1px solid #fecaca;border-radius:var(--radius);padding:10px 12px;font-size:12px;color:var(--red);margin-bottom:12px;display:flex;align-items:center;gap:7px"><i class="ti ti-alert-circle" style="font-size:16px"></i>No available balance to withdraw this month</div>`:''}
-
-    <!-- Amount -->
     <div class="fr" style="margin-bottom:10px">
-      <label class="fl">Withdrawal amount (${db.settings.currency}) *</label>
-      <div style="position:relative">
-        <input class="fi" type="number" id="wd-amt" min="0" step="0.01" max="${availBal}" value="${Math.max(0,availBal).toFixed(2)}" style="font-size:16px;font-weight:700;color:var(--green);height:40px;padding-left:36px" oninput="updateWdValidation(${availBal})">
-        <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:14px;color:var(--t2);pointer-events:none">${db.settings.currency}</span>
-      </div>
-      <div id="wd-warn" style="font-size:11px;color:var(--red);margin-top:4px;min-height:16px"></div>
+      <label class="fl">Withdrawal amount (${cur}) *</label>
+      <input class="fi" type="number" id="pwd-amt" min="0.01" step="0.01"
+        value="${Math.max(0,st.available).toFixed(2)}"
+        style="font-size:16px;font-weight:700;height:40px" oninput="checkPwdOver(${st.available})">
+      <div id="pwd-over-warn" style="font-size:11px;color:var(--amber);margin-top:4px;min-height:14px"></div>
     </div>
-
-    <!-- Method -->
     <div class="fr2" style="margin-bottom:10px">
+      <div class="fr"><label class="fl">Method</label>
+        <select class="fi" id="pwd-method" style="background:var(--bg2)">
+          <option value="cash">💵 Cash</option><option value="bank">🏦 Bank</option>
+          <option value="mobile">📱 Mobile</option><option value="cheque">📄 Cheque</option>
+        </select>
+      </div>
+      <div class="fr"><label class="fl">Date</label>
+        <input class="fi" type="date" id="pwd-date" value="${new Date().toISOString().slice(0,10)}">
+      </div>
+    </div>
+    <div class="fr" style="margin-bottom:12px">
+      <label class="fl">Note (optional)</label>
+      <input class="fi" type="text" id="pwd-note" placeholder="Reason or reference…">
+    </div>
+    <!-- Admin approval section — hidden until amount exceeds available -->
+    <div id="pwd-approval-box" style="display:none;background:var(--amberl);border:1px solid #fde68a;border-radius:var(--radius);padding:12px;margin-top:4px">
+      <div style="font-size:12px;font-weight:600;color:var(--amber);margin-bottom:8px;display:flex;align-items:center;gap:6px">
+        <i class="ti ti-lock" style="font-size:15px"></i>
+        Amount exceeds available balance — Admin approval required
+      </div>
       <div class="fr">
-        <label class="fl">Payment method</label>
-        <select class="fi" id="wd-method" style="background:var(--bg2)">
-          <option value="cash">💵 Cash</option>
-          <option value="bank">🏦 Bank transfer</option>
-          <option value="mobile">📱 Mobile payment</option>
-          <option value="cheque">📄 Cheque</option>
+        <label class="fl">Admin username</label>
+        <select class="fi" id="pwd-admin-user" style="background:#fff;margin-bottom:8px">
+          ${db.users.filter(u=>u.role==='admin'||u.role==='owner').map(u=>`<option value="${u.id}">${u.name} (${u.role})</option>`).join('')}
         </select>
       </div>
       <div class="fr">
-        <label class="fl">Date</label>
-        <input class="fi" type="date" id="wd-date" value="${new Date().toISOString().slice(0,10)}">
+        <label class="fl">Admin PIN</label>
+        <input class="fi" type="password" id="pwd-admin-pin" placeholder="Enter admin PIN…" maxlength="8">
       </div>
-    </div>
-
-    <!-- Note -->
-    <div class="fr">
-      <label class="fl">Note (optional)</label>
-      <input class="fi" type="text" id="wd-note" placeholder="Reason or reference…">
     </div>`;
-
   document.getElementById('g-modal-foot').innerHTML=`
     <button class="btn-sm" onclick="closeGModal()">Cancel</button>
-    <button class="btn btn-green" onclick="confirmWithdrawal(${id},${availBal})" ${availBal<=0?'disabled style="opacity:.4;cursor:not-allowed"':''}><i class="ti ti-cash"></i>Confirm withdrawal</button>`;
+    <button class="btn" style="background:var(--teal)" onclick="confirmPartnerWithdrawal(${id},${st.available})">
+      <i class="ti ti-cash"></i>Confirm Withdrawal
+    </button>`;
   document.getElementById('g-modal-bg').classList.add('show');
 }
 
-function updateWdValidation(avail){
-  const amt=parseFloat(document.getElementById('wd-amt')?.value)||0;
-  const warn=document.getElementById('wd-warn');
-  if(!warn)return;
-  if(amt>avail)warn.textContent=`⚠ Exceeds available balance of ${db.settings.currency}${avail.toFixed(2)}`;
-  else if(amt<=0)warn.textContent='⚠ Amount must be greater than 0';
-  else warn.textContent='';
+function checkPwdOver(avail){
+  const amt=parseFloat(document.getElementById('pwd-amt')?.value)||0;
+  const warn=document.getElementById('pwd-over-warn');
+  const box=document.getElementById('pwd-approval-box');
+  if(amt>avail+0.01){
+    if(warn)warn.textContent=`⚠ Exceeds available balance by ${db.settings.currency}${(amt-avail).toFixed(2)} — admin approval needed`;
+    if(box)box.style.display='block';
+  } else {
+    if(warn)warn.textContent='';
+    if(box)box.style.display='none';
+  }
 }
 
-function confirmWithdrawal(id,avail){
+function confirmPartnerWithdrawal(id, avail){
   const p=db.partners.find(x=>x.id===id);if(!p)return;
-  const amt=parseFloat(document.getElementById('wd-amt')?.value)||0;
+  const amt=parseFloat(document.getElementById('pwd-amt')?.value)||0;
   if(amt<=0){showToast('⚠ Enter a valid amount');return;}
-  if(amt>avail+0.01){showToast('⚠ Amount exceeds available balance');return;}
-  const method=document.getElementById('wd-method')?.value||'cash';
-  const date=document.getElementById('wd-date')?.value||new Date().toISOString().slice(0,10);
-  const note=document.getElementById('wd-note')?.value||'';
-  if(!p.withdrawals)p.withdrawals=[];
-  const wid='WD-'+String(db.counters.finance++).padStart(4,'0');
-  p.withdrawals.push({id:wid,date,amount:amt,method,note});
-  // Log to finance
-  db.finance.push({id:db.counters.finance++,date,desc:'Withdrawal — '+p.name,cat:'withdrawal',amount:amt,type:'expense',ref:wid});
+  const method=document.getElementById('pwd-method')?.value||'cash';
+  const date=document.getElementById('pwd-date')?.value||new Date().toISOString().slice(0,10);
+  const note=document.getElementById('pwd-note')?.value||'';
+  const isOver=amt>avail+0.01;
+  if(isOver){
+    // Validate admin PIN
+    const adminUserId=parseInt(document.getElementById('pwd-admin-user')?.value||'0');
+    const adminPin=document.getElementById('pwd-admin-pin')?.value||'';
+    const adminUser=db.users.find(u=>u.id===adminUserId&&(u.role==='admin'||u.role==='owner'));
+    if(!adminUser){showToast('⚠ Select a valid admin');return;}
+    if(simpleHash(adminPin)!==adminUser.pinHash){
+      showToast('⚠ Incorrect admin PIN');
+      document.getElementById('pwd-admin-pin').style.border='1px solid var(--red)';
+      setTimeout(()=>{const el=document.getElementById('pwd-admin-pin');if(el)el.style.border='';},1500);
+      return;
+    }
+  }
+  // Record in cash ledger with partnerId tag
+  const wref='WD-'+String(db.counters.cash++).padStart(4,'0');
+  db.cash.ledger.push({id:'CL-'+Date.now(),date,type:'out',src:'withdrawal',ref:wref,
+    partnerId:p.id,
+    desc:'Withdrawal — '+p.name+(isOver?' [admin approved]':''),
+    note,amount:amt,balance:0,method});
+  db.cash.balance=+(db.cash.balance-amt).toFixed(2);
+  recalcCashBalances();
+  // Keep partner.drawn in sync for legacy display
+  p.drawn=parseFloat(((p.drawn||0)+amt).toFixed(2));
+  // Also log to finance
+  db.finance.push({id:db.counters.finance++,date,
+    desc:'Partner withdrawal — '+p.name+(isOver?' [admin approved]':''),
+    cat:'withdrawal',amount:amt,type:'expense',ref:wref});
   saveDB();closeGModal();renderSetPartners();
   showToast(`✓ ${db.settings.currency}${amt.toFixed(2)} withdrawn for ${p.name}`);
 }
+
+// ── Partner Contribution Modal ────────────────────────────────────────────
+function openPartnerContribModal(id){
+  const p=db.partners.find(x=>x.id===id);if(!p)return;
+  const cur=db.settings.currency;
+  document.getElementById('g-modal-title').textContent='💼 Contribute — '+p.name;
+  document.getElementById('g-modal-body').innerHTML=`
+    <div style="background:var(--acl);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;color:var(--t2)">Already invested</span>
+      <span style="font-size:18px;font-weight:700;color:var(--ac)">${cur}${(p.invested||0).toFixed(2)}</span>
+    </div>
+    <div class="fr" style="margin-bottom:10px">
+      <label class="fl">Amount (${cur}) *</label>
+      <input class="fi" type="number" id="pc-amt" min="0.01" step="0.01" placeholder="0.00" style="font-size:16px;height:40px">
+    </div>
+    <div class="fr2" style="margin-bottom:10px">
+      <div class="fr"><label class="fl">Method</label>
+        <select class="fi" id="pc-method" style="background:var(--bg2)">
+          <option value="cash">💵 Cash</option><option value="bank">🏦 Bank</option>
+          <option value="mobile">📱 Mobile</option>
+        </select>
+      </div>
+      <div class="fr"><label class="fl">Date</label>
+        <input class="fi" type="date" id="pc-date" value="${new Date().toISOString().slice(0,10)}">
+      </div>
+    </div>
+    <div class="fr">
+      <label class="fl">Note (optional)</label>
+      <input class="fi" type="text" id="pc-note" placeholder="Investment round, capital injection…">
+    </div>`;
+  document.getElementById('g-modal-foot').innerHTML=`
+    <button class="btn-sm" onclick="closeGModal()">Cancel</button>
+    <button class="btn btn-green" onclick="confirmPartnerContrib(${id})">
+      <i class="ti ti-check"></i>Record Contribution
+    </button>`;
+  document.getElementById('g-modal-bg').classList.add('show');
+}
+
+function confirmPartnerContrib(id){
+  const p=db.partners.find(x=>x.id===id);if(!p)return;
+  const amt=parseFloat(document.getElementById('pc-amt')?.value)||0;
+  if(amt<=0){showToast('⚠ Enter a valid amount');return;}
+  const method=document.getElementById('pc-method')?.value||'cash';
+  const date=document.getElementById('pc-date')?.value||new Date().toISOString().slice(0,10);
+  const note=document.getElementById('pc-note')?.value||'';
+  // update invested total
+  p.invested=parseFloat(((p.invested||0)+amt).toFixed(2));
+  // cash ledger with partnerId
+  const cref='CTB-'+String(db.counters.cash++).padStart(4,'0');
+  if(!db.cash.contributions)db.cash.contributions=[];
+  db.cash.contributions.push({id:cref,date,amount:amt,from:p.name,desc:'Partner contribution — '+p.name,note,partnerId:p.id});
+  db.cash.ledger.push({id:'CL-'+Date.now(),date,type:'in',src:'contribution',ref:cref,
+    partnerId:p.id,
+    desc:'Contribution — '+p.name,note,amount:amt,balance:0,method});
+  db.cash.balance=+(db.cash.balance+amt).toFixed(2);
+  recalcCashBalances();
+  saveDB();closeGModal();renderSetPartners();
+  showToast(`✓ ${db.settings.currency}${amt.toFixed(2)} contribution recorded for ${p.name}`);
+}
+
+// ── Per-partner cash report ───────────────────────────────────────────────
+function viewPartnerReport(id){
+  const p=db.partners.find(x=>x.id===id);if(!p)return;
+  // Switch to cash tab and show partner filter
+  _cashTab='report';
+  _cashReportPartnerId=id;
+  nav('cash',document.querySelector('.sn[onclick*="cash"]'));
+}
+
 function openPartnerModal(){
   document.getElementById('g-modal-title').textContent='Add Partner';
   document.getElementById('g-modal-body').innerHTML=`
@@ -2493,35 +2589,19 @@ function openPartnerModal(){
       <div class="fr"><label class="fl">Share (%)</label><input class="fi" type="number" id="p-share" min="1" max="100" value="10"></div>
       <div class="fr"><label class="fl">Invested (${db.settings.currency})</label><input class="fi" type="number" id="p-inv" min="0" value="0"></div>
     </div>`;
-  document.getElementById('g-modal-foot').innerHTML=`<button class="btn-sm" onclick="closeGModal()">Cancel</button><button class="btn" onclick="savePartner()"><i class="ti ti-check"></i>Save</button>`;
+  document.getElementById('g-modal-foot').innerHTML=`
+    <button class="btn-sm" onclick="closeGModal()">Cancel</button>
+    <button class="btn" onclick="savePartner()"><i class="ti ti-check"></i>Save</button>`;
   document.getElementById('g-modal-bg').classList.add('show');
 }
 function savePartner(){
   const name=document.getElementById('p-name')?.value?.trim();if(!name)return;
-  db.partners.push({id:db.counters.partner++,name,nameInit:name.split(' ').map(w=>w[0]||'').slice(0,2).join('').toUpperCase(),share:parseInt(document.getElementById('p-share')?.value)||10,invested:parseFloat(document.getElementById('p-inv')?.value)||0,drawn:0});
+  db.partners.push({id:db.counters.partner++,name,
+    nameInit:name.split(' ').map(w=>w[0]||'').slice(0,2).join('').toUpperCase(),
+    share:parseInt(document.getElementById('p-share')?.value)||10,
+    invested:parseFloat(document.getElementById('p-inv')?.value)||0,
+    drawn:0,withdrawals:[],availableBalance:0});
   saveDB();closeGModal();renderSetPartners();showToast('✓ Partner saved!');
-}
-function openPayDivModal(id){
-  const p=db.partners.find(x=>x.id===id);
-  const div=parseFloat((MONTHLY_PROFIT*p.share/100).toFixed(2));
-  document.getElementById('g-modal-title').textContent='Pay Dividend — '+p.name;
-  document.getElementById('g-modal-body').innerHTML=`
-    <div style="background:var(--acl);border-radius:var(--radius);padding:10px 12px;margin-bottom:4px;display:flex;justify-content:space-between">
-      <span style="font-size:12px;color:var(--ac)">Calculated dividend</span>
-      <span style="font-size:18px;font-weight:600;color:var(--ac)">${db.settings.currency}${div}</span>
-    </div>
-    <div class="fr"><label class="fl">Amount (${db.settings.currency})</label><input class="fi" type="number" id="div-amt" value="${div}"></div>
-    <div class="fr"><label class="fl">Note</label><input class="fi" type="text" id="div-note" placeholder="Optional note"></div>`;
-  document.getElementById('g-modal-foot').innerHTML=`<button class="btn-sm" onclick="closeGModal()">Cancel</button><button class="btn btn-green" onclick="payDiv(${id})"><i class="ti ti-coin"></i>Confirm</button>`;
-  document.getElementById('g-modal-bg').classList.add('show');
-}
-function payDiv(id){
-  const p=db.partners.find(x=>x.id===id);
-  const amt=parseFloat(document.getElementById('div-amt')?.value)||0;
-  p.drawn=parseFloat((p.drawn+amt).toFixed(2));
-  const today=new Date().toISOString().slice(0,10);
-  db.finance.push({id:db.counters.finance++,date:today,desc:'Dividend — '+p.name,cat:'dividend',amount:amt,type:'expense',ref:'DIV'});
-  saveDB();closeGModal();renderSetPartners();showToast('✓ Dividend paid!');
 }
 function deletePartner(id){db.partners=db.partners.filter(p=>p.id!==id);saveDB();renderSetPartners();}
 
@@ -2643,7 +2723,7 @@ function recalcCashBalances(){
   db.cash.ledger=sorted;
 }
 
-let _cashTab='ledger', _cashPeriod='all';
+let _cashTab='ledger', _cashPeriod='all', _cashPartnerFilter='all', _cashReportPartnerId=null;
 
 function renderCash(){
   if(!db.cash)db.cash={balance:0,openingBalance:0,ledger:[],contributions:[]};
@@ -2679,7 +2759,8 @@ function renderCash(){
       <button class="subtab${_cashTab==='ledger'?' on':''}" onclick="_cashTab='ledger';renderCash()"><i class="ti ti-list-details"></i>Ledger</button>
       <button class="subtab${_cashTab==='contribute'?' on':''}" onclick="_cashTab='contribute';renderCash()"><i class="ti ti-arrow-bar-to-down"></i>Receive Cash</button>
       <button class="subtab${_cashTab==='withdraw'?' on':''}" onclick="_cashTab='withdraw';renderCash()"><i class="ti ti-arrow-bar-up"></i>Withdrawal</button>
-      <button class="subtab${_cashTab==='report'?' on':''}" onclick="_cashTab='report';renderCash()"><i class="ti ti-printer"></i>Print Report</button>
+      <button class="subtab${_cashTab==='report'?' on':''}" onclick="_cashTab='report';_cashReportPartnerId=null;renderCash()"><i class="ti ti-printer"></i>Print Report</button>
+      <button class="subtab${_cashTab==='partner'?' on':''}" onclick="_cashTab='partner';renderCash()"><i class="ti ti-user-dollar"></i>Partner Reports</button>
       <button class="subtab${_cashTab==='settings'?' on':''}" onclick="_cashTab='settings';renderCash()"><i class="ti ti-settings"></i>Setup</button>
     </div>
     <div id="cash-tab-body"></div>`;
@@ -2688,6 +2769,7 @@ function renderCash(){
   else if(_cashTab==='contribute')renderCashContribute();
   else if(_cashTab==='withdraw')renderCashWithdraw();
   else if(_cashTab==='report')renderCashReport();
+  else if(_cashTab==='partner')renderCashPartnerReports();
   else renderCashSetup();
 }
 
@@ -2699,6 +2781,7 @@ function getCashLedgerFiltered(){
   if(_cashPeriod==='today')rows=rows.filter(e=>e.date===today);
   else if(_cashPeriod==='month')rows=rows.filter(e=>e.date>=monthStart);
   else if(_cashPeriod==='year')rows=rows.filter(e=>e.date>=yearStart);
+  if(_cashPartnerFilter!=='all')rows=rows.filter(e=>String(e.partnerId)===String(_cashPartnerFilter));
   return rows;
 }
 
@@ -2712,11 +2795,16 @@ function renderCashLedger(){
                  withdrawal:'<i class="ti ti-arrow-bar-up" style="font-size:12px;color:var(--purple)"></i>',
                  opening:'<i class="ti ti-flag" style="font-size:12px;color:var(--t2)"></i>'};
   document.getElementById('cash-tab-body').innerHTML=`
-    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
       <span style="font-size:12px;font-weight:500;color:var(--t2)">Period:</span>
       ${['all','today','month','year'].map(p=>`
         <button class="filt-btn${_cashPeriod===p?' on':''}" onclick="_cashPeriod='${p}';renderCashLedger()">${p==='all'?'All Time':p.charAt(0).toUpperCase()+p.slice(1)}</button>`).join('')}
       <span style="margin-left:auto;font-size:12px;color:var(--t2)">${rows.length} entries</span>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:12px;font-weight:500;color:var(--t2)">Partner:</span>
+      <button class="filt-btn${_cashPartnerFilter==='all'?' on':''}" onclick="_cashPartnerFilter='all';renderCashLedger()">All Partners</button>
+      ${db.partners.map(p=>`<button class="filt-btn${String(_cashPartnerFilter)===String(p.id)?' on':''}" onclick="_cashPartnerFilter=${p.id};renderCashLedger()">${p.nameInit} — ${p.name.split(' ')[0]}</button>`).join('')}
     </div>
     <div class="card"><table>
       <thead><tr>
@@ -3012,6 +3100,131 @@ function printCashReport(){
       @media print{@page{margin:1cm}}
     </style></head><body>${el.outerHTML}
     <script>setTimeout(()=>{window.print();window.close();},300)<\/script></body></html>`);
+  w.document.close();
+}
+
+function renderCashPartnerReports(){
+  const cur=db.settings.currency;
+  // If a specific partner was requested (from settings page), default to them
+  let selId=_cashReportPartnerId!==null?String(_cashReportPartnerId):'all';
+
+  const partnerSelect=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+    <span style="font-size:12.5px;font-weight:500;color:var(--t1)">Select Partner:</span>
+    <button class="filt-btn${selId==='all'?' on':''}" onclick="_cashReportPartnerId=null;renderCashPartnerReports()">All Partners</button>
+    ${db.partners.map(p=>`<button class="filt-btn${selId===String(p.id)?' on':''}" onclick="_cashReportPartnerId=${p.id};renderCashPartnerReports()">${p.name}</button>`).join('')}
+  </div>`;
+
+  let html=partnerSelect;
+
+  const renderOne=(p)=>{
+    const st=getPartnerStats(p);
+    const entries=(db.cash.ledger||[]).filter(e=>e.partnerId===p.id).slice().sort((a,b)=>a.date>b.date?1:-1);
+    const totalIn=entries.filter(e=>e.type==='in').reduce((s,e)=>s+e.amount,0);
+    const totalOut=entries.filter(e=>e.type==='out').reduce((s,e)=>s+e.amount,0);
+    const today=new Date().toISOString().slice(0,10);
+    const monthStart=today.slice(0,7)+'-01';
+    const mEntries=entries.filter(e=>e.date>=monthStart);
+    const mIn=mEntries.filter(e=>e.type==='in').reduce((s,e)=>s+e.amount,0);
+    const mOut=mEntries.filter(e=>e.type==='out').reduce((s,e)=>s+e.amount,0);
+    return`<div class="card" id="pr-${p.id}" style="margin-bottom:14px">
+      <div class="ch">
+        <span>
+          <span style="width:32px;height:32px;border-radius:50%;background:var(--purplel);color:var(--purple);font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;margin-right:8px">${p.nameInit}</span>
+          ${p.name} — ${p.share}% equity
+        </span>
+        <button class="btn-sm" onclick="printPartnerReport(${p.id})"><i class="ti ti-printer" style="font-size:13px"></i>Print / PDF</button>
+      </div>
+      <div class="cb">
+        <!-- Summary grid -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px">
+          <div class="ps"><div class="ps-lbl">All-time profit share</div><div class="ps-val" style="color:var(--ac)">${cur}${st.totalDivShare.toFixed(2)}</div></div>
+          <div class="ps"><div class="ps-lbl">Total contributed</div><div class="ps-val" style="color:var(--green)">${cur}${totalIn.toFixed(2)}</div></div>
+          <div class="ps"><div class="ps-lbl">Total withdrawn</div><div class="ps-val" style="color:var(--red)">${cur}${totalOut.toFixed(2)}</div></div>
+          <div class="ps" style="background:${st.available>=0?'var(--greenl)':'var(--redl)'};border:1px solid ${st.available>=0?'#bbf7d0':'#fecaca'}">
+            <div class="ps-lbl">Available balance</div>
+            <div class="ps-val" style="color:${st.available>=0?'var(--green)':'var(--red)'};font-weight:700">${cur}${st.available.toFixed(2)}</div>
+          </div>
+        </div>
+        <!-- This month -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+          <div style="background:var(--bg2);border-radius:var(--radius);padding:10px;text-align:center">
+            <div style="font-size:10.5px;color:var(--t2);margin-bottom:3px">This month div.</div>
+            <div style="font-size:16px;font-weight:600;color:var(--ac)">${cur}${st.monthlyDiv.toFixed(2)}</div>
+          </div>
+          <div style="background:var(--greenl);border-radius:var(--radius);padding:10px;text-align:center">
+            <div style="font-size:10.5px;color:var(--green);margin-bottom:3px">Month in</div>
+            <div style="font-size:16px;font-weight:600;color:var(--green)">${cur}${mIn.toFixed(2)}</div>
+          </div>
+          <div style="background:var(--redl);border-radius:var(--radius);padding:10px;text-align:center">
+            <div style="font-size:10.5px;color:var(--red);margin-bottom:3px">Month out</div>
+            <div style="font-size:16px;font-weight:600;color:var(--red)">${cur}${mOut.toFixed(2)}</div>
+          </div>
+        </div>
+        <!-- Ledger -->
+        <div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:6px">Transaction history (${entries.length} entries)</div>
+        <table style="font-size:11.5px">
+          <thead><tr>
+            <th style="width:88px">Date</th><th style="width:80px">Type</th><th>Description</th>
+            <th style="width:68px">Method</th><th style="width:90px">In</th><th style="width:90px">Out</th>
+          </tr></thead>
+          <tbody>
+            ${entries.length===0?`<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--t2)">No cash transactions yet for this partner</td></tr>`:''}
+            ${entries.map(e=>`<tr>
+              <td style="color:var(--t2)">${e.date}</td>
+              <td><span class="badge ${e.src==='contribution'?'b-b':e.src==='withdrawal'?'b-r':'b-p'}">${e.src}</span></td>
+              <td style="font-weight:500">${e.desc}</td>
+              <td><span class="badge b-gray" style="font-size:10px">${e.method||'—'}</span></td>
+              <td style="color:var(--green);font-weight:600">${e.type==='in'?cur+e.amount.toFixed(2):'—'}</td>
+              <td style="color:var(--red);font-weight:600">${e.type==='out'?cur+e.amount.toFixed(2):'—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  };
+
+  if(selId==='all'){
+    if(db.partners.length===0){html+=`<div class="card"><div class="cb" style="text-align:center;padding:24px;color:var(--t2)">No partners added yet</div></div>`;}
+    else db.partners.forEach(p=>{html+=renderOne(p);});
+  } else {
+    const p=db.partners.find(x=>String(x.id)===selId);
+    if(p)html+=renderOne(p);
+  }
+  document.getElementById('cash-tab-body').innerHTML=html;
+}
+
+function printPartnerReport(id){
+  const p=db.partners.find(x=>x.id===id);if(!p)return;
+  const el=document.getElementById('pr-'+id);if(!el)return;
+  const cur=db.settings.currency;
+  const today=new Date().toISOString().slice(0,10);
+  const w=window.open('','_blank','width=820,height=950');
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <title>Partner Report — ${p.name}</title>
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;color:#111;padding:24px}
+      h2{font-size:16px;margin-bottom:4px}
+      .sub{color:#6b7280;font-size:12px;margin-bottom:16px}
+      table{width:100%;border-collapse:collapse;margin-top:8px}
+      th{font-size:10px;font-weight:600;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #e5e7eb;background:#f9fafb;text-align:left}
+      td{padding:6px 8px;border-bottom:1px solid #f3f4f6;font-size:11.5px}
+      .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
+      .box{background:#f9fafb;border-radius:6px;padding:10px;text-align:center}
+      .box-lbl{font-size:10px;color:#6b7280;margin-bottom:3px}
+      .box-val{font-size:15px;font-weight:700}
+      .badge{font-size:10px;padding:2px 6px;border-radius:10px;font-weight:600;display:inline-block}
+      .b-b{background:#dbeafe;color:#1d4ed8}.b-r{background:#fee2e2;color:#b91c1c}
+      .b-p{background:#ede9fe;color:#6d28d9}.b-gray{background:#f3f4f6;color:#6b7280}
+      @media print{@page{margin:1cm}}
+    </style></head>
+    <body>
+      <div style="border-bottom:2px solid #2563eb;padding-bottom:12px;margin-bottom:16px">
+        <h2>${db.settings.storeName||'SwiftPOS'} — Partner Cash Report</h2>
+        <div class="sub">${p.name} · ${p.share}% equity · Generated ${today}</div>
+      </div>
+      ${el.querySelector('.cb').innerHTML}
+    <script>setTimeout(()=>{window.print();window.close();},400)<\/script></body></html>`);
   w.document.close();
 }
 
