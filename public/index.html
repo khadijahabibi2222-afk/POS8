@@ -1255,10 +1255,8 @@ function confirmPOReceive(){
     totalCost+=got*(o.items[i].cost||0);
   });
   o.status=allFull?'received':'partial';
-  const today=new Date().toISOString().slice(0,10);
-  db.finance.push({id:db.counters.finance++,date:today,desc:'Purchase '+o.ref,cat:'purchase',amount:+totalCost.toFixed(2),type:'expense',ref:o.ref});
   saveDB();closeGModal();renderPurchase();
-  showToast(`✓ ${o.ref} received — ${updated} item${updated!==1?'s':''} updated in stock · finance logged`);
+  showToast(`✓ ${o.ref} received — ${updated} item${updated!==1?'s':''} updated in stock`);
 }
 function openNewSupplierModal(){
   _poModalMode='supplier';
@@ -1291,7 +1289,7 @@ const LANGS={
     nav_dashboard:'Dashboard',nav_settings:'Settings',nav_reset:'Reset data',
     // Finance
     total_income:'Total income',total_expenses:'Total expenses',net_profit:'Net profit',transactions:'Transactions',
-    fin_banner:'POS sales auto-log income. Purchase receipts auto-log expenses.',
+    fin_banner:'Sales auto-log income. Use Expenses module to log costs manually.',
     col_ref:'Ref',col_date:'Date',col_desc:'Description',col_cat:'Category',col_type:'Type',col_amount:'Amount',
     // Expenses full module
     exp_title:'Expenses',exp_add:'Add Expense',exp_tab_all:'All Expenses',exp_tab_add:'Add New',exp_tab_summary:'Summary',
