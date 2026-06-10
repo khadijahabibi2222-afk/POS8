@@ -23,26 +23,12 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 /* ── default seed data ───────────────────── */
 const DEFAULT_DB = {
-  items: [
-    {id:1,name:'Tomato',barcode:'6001234000001',price:1.50,cost:0.80,stock:420,min:50,cat:'food',unit:'kg',wsUnit:'carton',wsQty:20,wsPrice:22.00},
-    {id:2,name:'Orange Juice',barcode:'6001234000002',price:2.20,cost:1.10,stock:60,min:12,cat:'drink',unit:'ltr',wsUnit:'carton',wsQty:12,wsPrice:18.00},
-    {id:3,name:'Rice 1kg',barcode:'6001234000003',price:3.50,cost:2.00,stock:40,min:10,cat:'food',unit:'kg',wsUnit:'box',wsQty:25,wsPrice:42.00},
-    {id:4,name:'Shampoo',barcode:'6001234000004',price:4.99,cost:2.50,stock:36,min:6,cat:'home',unit:'pcs',wsUnit:'box',wsQty:12,wsPrice:22.00},
-    {id:5,name:'Bread',barcode:'6001234000005',price:1.80,cost:0.90,stock:15,min:20,cat:'food',unit:'pcs',wsUnit:'dozen',wsQty:12,wsPrice:16.00},
-  ],
+  items: [],
   sales: [],
   expenses: [],
   finance: [],
-  customers: [
-    {id:1,name:'Maria Santos',phone:'+31 6 1234 5678',points:820,balance:0,totalSpent:0,visits:0},
-    {id:2,name:'Johan Bakker',phone:'+31 6 2345 6789',points:120,balance:45,totalSpent:0,visits:0},
-  ],
-  suppliers: [
-    {id:1,name:'Al-Rashid Foods',phone:'+31 20 555 0101',email:'orders@alrashid.nl',cat:'food',addr:'Amsterdam West',initials:'AR'},
-    {id:2,name:'Euro Drinks BV',phone:'+31 20 555 0202',email:'info@eurodrinks.nl',cat:'drink',addr:'Rotterdam',initials:'ED'},
-    {id:3,name:'HomeStore NL',phone:'+31 20 555 0303',email:'supply@homestore.nl',cat:'home',addr:'Utrecht',initials:'HS'},
-    {id:4,name:'General Traders',phone:'+31 20 555 0404',email:'gt@general.nl',cat:'other',addr:'Den Haag',initials:'GT'},
-  ],
+  customers: [],
+  suppliers: [],
   orders: [],
   users: [
     {id:1,name:'Ahmad Karimi',email:'ahmad@swiftpos.com',role:'owner',status:'active',last:'Today',pinHash:'1509442'},
@@ -59,11 +45,17 @@ const DEFAULT_DB = {
     taxRate:5, taxEnabled:true, taxInclusive:false, taxOnReceipt:true, taxName:'Tax',
     shipmentEnabled:false, shipmentAmount:0, shipmentLabel:'Shipment',
     logoDataUrl:'',
-    currency:'€', storeName:'SwiftPOS', phone:'',
+    currency:'؋', storeName:'SwiftPOS', phone:'',
     addr:'', email:'',
     receiptFooter:'Thank you! · شكراً · مننه', lang:'en', expBudget:0,
   },
-  counters: {sale:1,item:6,customer:3,finance:1,po:1,user:5,partner:4,exp:1},
+  cash: {
+    balance: 0,
+    openingBalance: 0,
+    ledger: [],
+    contributions: [],
+  },
+  counters: {sale:1,item:1,customer:1,finance:1,po:1,user:5,partner:4,exp:1,cash:1},
 };
 
 /* ── flat-file helpers ───────────────────────
