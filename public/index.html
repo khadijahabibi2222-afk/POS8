@@ -383,6 +383,7 @@ html[dir=rtl] .toggle-row{flex-direction:row-reverse}
       <div class="sn-label" id="sn-lbl-mgmt">Management</div>
       <button class="sn" onclick="nav('finance',this)"><i class="ti ti-chart-pie"></i><span id="sn-finance">Finance</span></button>
       <button class="sn" onclick="nav('expenses',this)"><i class="ti ti-receipt-2"></i><span id="sn-expenses">Expenses</span></button>
+      <button class="sn" onclick="nav('cash',this)"><i class="ti ti-building-bank"></i><span id="sn-cash">Cash Account</span></button>
       <button class="sn" onclick="nav('customers',this)"><i class="ti ti-users"></i><span id="sn-customers">Customers</span></button>
       <button class="sn" onclick="nav('dashboard',this)"><i class="ti ti-layout-dashboard"></i><span id="sn-dashboard">Dashboard</span></button>
       <div class="sn-sep"></div>
@@ -506,6 +507,7 @@ function render(page){
   else if(page==='purchase'){m.style.padding='16px';renderPurchase();}
   else if(page==='finance'){m.style.padding='16px';renderFinance();}
   else if(page==='expenses'){m.style.padding='16px';renderExpenses();}
+  else if(page==='cash'){m.style.padding='16px';renderCash();}
   else if(page==='customers'){m.style.padding='16px';renderCustomers();}
   else if(page==='settings'){m.style.padding='0';renderSettings();}
   else{m.style.padding='16px';renderDashboard();}
@@ -765,6 +767,14 @@ function completeSale(){
   if(discount>0)db.finance.push({id:db.counters.finance++,date:today,desc:'Discount — '+ref,cat:'discount',amount:discount,type:'expense',ref});
   if(shipAmt>0)db.finance.push({id:db.counters.finance++,date:today,desc:(db.settings.shipmentLabel||'Shipment')+' — '+ref,cat:'transport',amount:shipAmt,type:'expense',ref});
   if(custId){const cust=db.customers.find(c=>c.id==custId);if(cust){cust.visits=(cust.visits||0)+1;cust.totalSpent=+((cust.totalSpent||0)+total).toFixed(2);cust.points=(cust.points||0)+Math.floor(total);if(method==='credit')cust.balance=+((cust.balance||0)+total).toFixed(2);}}
+  // Cash ledger — record cash-in for non-credit sales
+  if(method!=='credit'){
+    const cashEntry={id:'CL-'+Date.now(),date:today,type:'in',src:'sale',ref,
+      desc:'Sale '+ref+' ('+mode+')',amount:total,balance:0,method};
+    db.cash.ledger.push(cashEntry);
+    db.cash.balance=+(db.cash.balance+total).toFixed(2);
+    recalcCashBalances();
+  }
   saveDB();window._cart=[];window._shipmentOn=undefined;
   const di=document.getElementById('disc-amt-inp');if(di)di.value='0';
   updateCartUI();updatePills();
@@ -1255,6 +1265,14 @@ function confirmPOReceive(){
     totalCost+=got*(o.items[i].cost||0);
   });
   o.status=allFull?'received':'partial';
+  // Cash ledger — record cash-out for purchase
+  if(totalCost>0){
+    const today2=new Date().toISOString().slice(0,10);
+    db.cash.ledger.push({id:'CL-'+Date.now(),date:today2,type:'out',src:'purchase',ref:o.ref,
+      desc:'Purchase '+o.ref+' — '+o.supplier,amount:totalCost,balance:0});
+    db.cash.balance=+(db.cash.balance-totalCost).toFixed(2);
+    recalcCashBalances();
+  }
   saveDB();closeGModal();renderPurchase();
   showToast(`✓ ${o.ref} received — ${updated} item${updated!==1?'s':''} updated in stock`);
 }
@@ -1865,6 +1883,13 @@ function saveExpense(id){
   } else {
     db.expenses.push(entry);
     db.finance.push({id:db.counters.finance++,date:entry.date,desc:desc,cat:cat,amount:amt,type:'expense',ref:'EXP-'+entry.id});
+  }
+  // Cash ledger — record cash-out for expense
+  if(!id&&entry.method==='cash'){
+    db.cash.ledger.push({id:'CL-'+Date.now(),date:entry.date,type:'out',src:'expense',
+      ref:'EXP-'+entry.id,desc:desc,amount:amt,balance:0});
+    db.cash.balance=+(db.cash.balance-amt).toFixed(2);
+    recalcCashBalances();
   }
   saveDB();
   _expTab='all';
@@ -2563,8 +2588,9 @@ async function doReset(type){
     db.expenses=[];
     db.finance=[];
     db.orders=[];
+    db.cash={balance:0,openingBalance:0,ledger:[],contributions:[]};
     db.counters={sale:1,item:db.counters.item,customer:db.counters.customer,
-                 finance:1,po:1,user:db.counters.user,partner:db.counters.partner,exp:1};
+                 finance:1,po:1,user:db.counters.user,partner:db.counters.partner,exp:1,cash:1};
     // Reset transactional customer fields
     db.customers.forEach(c=>{c.points=0;c.balance=0;c.totalSpent=0;c.visits=0;});
     // Re-render immediately — user sees fresh app at once
@@ -2589,6 +2615,445 @@ function renderSetReset(){
         <button class="dz-btn" onclick="doReset('${t}')">${t==='all'?'Factory reset':'Reset'}</button>
       </div>`).join('')}
     </div>`;
+}
+
+
+/* ════════════════════════════════════════════
+   CASH ACCOUNT MODULE
+   - Opening balance
+   - Auto-records: sales in, purchases out, expenses out
+   - Manual contributions (owner/partner deposits)
+   - Manual withdrawals with history
+   - Printable statement report
+════════════════════════════════════════════ */
+
+function recalcCashBalances(){
+  // Rebuild running balance column from first entry
+  if(!db.cash||!db.cash.ledger)return;
+  const ob=db.cash.openingBalance||0;
+  let running=ob;
+  const sorted=db.cash.ledger.slice().sort((a,b)=>a.id>b.id?1:-1);
+  sorted.forEach(e=>{
+    running=e.type==='in'?+(running+e.amount).toFixed(2):+(running-e.amount).toFixed(2);
+    e.balance=running;
+  });
+  // also update db.cash.balance to latest
+  db.cash.balance=sorted.length?sorted[sorted.length-1].balance:ob;
+  // put back in date order
+  db.cash.ledger=sorted;
+}
+
+let _cashTab='ledger', _cashPeriod='all';
+
+function renderCash(){
+  if(!db.cash)db.cash={balance:0,openingBalance:0,ledger:[],contributions:[]};
+  recalcCashBalances();
+  const cur=db.settings.currency;
+  const bal=db.cash.balance||0;
+  const ob=db.cash.openingBalance||0;
+
+  // Compute period totals
+  const today=new Date().toISOString().slice(0,10);
+  const monthStart=today.slice(0,7)+'-01';
+  const ledger=db.cash.ledger;
+  const totalIn=ledger.filter(e=>e.type==='in').reduce((s,e)=>s+e.amount,0);
+  const totalOut=ledger.filter(e=>e.type==='out').reduce((s,e)=>s+e.amount,0);
+  const todayIn=ledger.filter(e=>e.type==='in'&&e.date===today).reduce((s,e)=>s+e.amount,0);
+  const monthIn=ledger.filter(e=>e.type==='in'&&e.date>=monthStart).reduce((s,e)=>s+e.amount,0);
+
+  document.getElementById('main').innerHTML=`
+    <div class="stat-row">
+      <div class="sc" style="border-left:3px solid ${bal>=0?'var(--greenm)':'var(--red)'}">
+        <div class="sl">Cash Balance</div>
+        <div class="sv" style="color:${bal>=0?'var(--green)':'var(--red)'};font-size:22px">${cur}${bal.toFixed(2)}</div>
+      </div>
+      <div class="sc sc-green"><div class="sl">Total Cash In</div><div class="sv" style="color:var(--green)">${cur}${totalIn.toFixed(2)}</div></div>
+      <div class="sc sc-red"><div class="sl">Total Cash Out</div><div class="sv" style="color:var(--red)">${cur}${totalOut.toFixed(2)}</div></div>
+      <div class="sc sc-accent"><div class="sl">Today In</div><div class="sv" style="color:var(--ac)">${cur}${todayIn.toFixed(2)}</div></div>
+      <div class="sc sc-amber"><div class="sl">This Month In</div><div class="sv" style="color:var(--amber)">${cur}${monthIn.toFixed(2)}</div></div>
+      <div class="sc sc-purple"><div class="sl">Opening Bal.</div><div class="sv" style="color:var(--purple)">${cur}${ob.toFixed(2)}</div></div>
+    </div>
+
+    <!-- Tab row -->
+    <div class="subtab-row">
+      <button class="subtab${_cashTab==='ledger'?' on':''}" onclick="_cashTab='ledger';renderCash()"><i class="ti ti-list-details"></i>Ledger</button>
+      <button class="subtab${_cashTab==='contribute'?' on':''}" onclick="_cashTab='contribute';renderCash()"><i class="ti ti-arrow-bar-to-down"></i>Receive Cash</button>
+      <button class="subtab${_cashTab==='withdraw'?' on':''}" onclick="_cashTab='withdraw';renderCash()"><i class="ti ti-arrow-bar-up"></i>Withdrawal</button>
+      <button class="subtab${_cashTab==='report'?' on':''}" onclick="_cashTab='report';renderCash()"><i class="ti ti-printer"></i>Print Report</button>
+      <button class="subtab${_cashTab==='settings'?' on':''}" onclick="_cashTab='settings';renderCash()"><i class="ti ti-settings"></i>Setup</button>
+    </div>
+    <div id="cash-tab-body"></div>`;
+
+  if(_cashTab==='ledger')renderCashLedger();
+  else if(_cashTab==='contribute')renderCashContribute();
+  else if(_cashTab==='withdraw')renderCashWithdraw();
+  else if(_cashTab==='report')renderCashReport();
+  else renderCashSetup();
+}
+
+function getCashLedgerFiltered(){
+  const today=new Date().toISOString().slice(0,10);
+  const monthStart=today.slice(0,7)+'-01';
+  const yearStart=today.slice(0,4)+'-01-01';
+  let rows=db.cash.ledger.slice().reverse();
+  if(_cashPeriod==='today')rows=rows.filter(e=>e.date===today);
+  else if(_cashPeriod==='month')rows=rows.filter(e=>e.date>=monthStart);
+  else if(_cashPeriod==='year')rows=rows.filter(e=>e.date>=yearStart);
+  return rows;
+}
+
+function renderCashLedger(){
+  const cur=db.settings.currency;
+  const rows=getCashLedgerFiltered();
+  const srcIcon={sale:'<i class="ti ti-cash-register" style="font-size:12px;color:var(--green)"></i>',
+                 purchase:'<i class="ti ti-truck" style="font-size:12px;color:var(--red)"></i>',
+                 expense:'<i class="ti ti-receipt" style="font-size:12px;color:var(--orange)"></i>',
+                 contribution:'<i class="ti ti-arrow-bar-to-down" style="font-size:12px;color:var(--ac)"></i>',
+                 withdrawal:'<i class="ti ti-arrow-bar-up" style="font-size:12px;color:var(--purple)"></i>',
+                 opening:'<i class="ti ti-flag" style="font-size:12px;color:var(--t2)"></i>'};
+  document.getElementById('cash-tab-body').innerHTML=`
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:12px;font-weight:500;color:var(--t2)">Period:</span>
+      ${['all','today','month','year'].map(p=>`
+        <button class="filt-btn${_cashPeriod===p?' on':''}" onclick="_cashPeriod='${p}';renderCashLedger()">${p==='all'?'All Time':p.charAt(0).toUpperCase()+p.slice(1)}</button>`).join('')}
+      <span style="margin-left:auto;font-size:12px;color:var(--t2)">${rows.length} entries</span>
+    </div>
+    <div class="card"><table>
+      <thead><tr>
+        <th style="width:90px">Date</th>
+        <th style="width:30px"></th>
+        <th style="width:160px">Description</th>
+        <th style="width:70px">Source</th>
+        <th style="width:55px">Ref</th>
+        <th style="width:90px">Cash In</th>
+        <th style="width:90px">Cash Out</th>
+        <th style="width:100px">Balance</th>
+        <th style="width:40px"></th>
+      </tr></thead>
+      <tbody>
+        ${rows.length===0?`<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--t2)"><i class="ti ti-coins" style="font-size:28px;display:block;margin:0 auto 8px;opacity:.25"></i>No transactions yet — complete a sale to start</td></tr>`:''}
+        ${rows.map(e=>`<tr>
+          <td style="color:var(--t2);font-size:11.5px">${e.date}</td>
+          <td style="text-align:center">${srcIcon[e.src]||''}</td>
+          <td style="font-weight:500;font-size:12px">${e.desc}</td>
+          <td><span class="badge ${e.src==='sale'?'b-g':e.src==='contribution'?'b-b':e.src==='withdrawal'?'b-p':'b-o'}" style="font-size:10px">${e.src}</span></td>
+          <td style="font-size:10.5px;color:var(--ac);font-weight:600">${e.ref||'—'}</td>
+          <td style="color:var(--green);font-weight:600">${e.type==='in'?cur+e.amount.toFixed(2):'—'}</td>
+          <td style="color:var(--red);font-weight:600">${e.type==='out'?cur+e.amount.toFixed(2):'—'}</td>
+          <td style="font-weight:700;color:${(e.balance||0)>=0?'var(--ac)':'var(--red)'}">${cur}${(e.balance||0).toFixed(2)}</td>
+          <td><button class="icon-btn del" onclick="deleteCashEntry('${e.id}')" title="Delete"><i class="ti ti-trash" style="font-size:11px"></i></button></td>
+        </tr>`).join('')}
+      </tbody>
+    </table></div>`;
+}
+
+function deleteCashEntry(id){
+  if(!confirm('Delete this cash entry?'))return;
+  db.cash.ledger=db.cash.ledger.filter(e=>e.id!==id);
+  recalcCashBalances();
+  saveDB();renderCash();showToast('Entry deleted');
+}
+
+function renderCashContribute(){
+  const cur=db.settings.currency;
+  const contribs=db.cash.contributions||[];
+  document.getElementById('cash-tab-body').innerHTML=`
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <!-- Add contribution -->
+      <div class="card">
+        <div class="ch"><span><i class="ti ti-arrow-bar-to-down" style="color:var(--ac);margin-right:6px"></i>Receive Cash / Deposit</span></div>
+        <div class="cb" style="display:flex;flex-direction:column;gap:10px">
+          <div class="fr"><label class="fl">Amount (${cur})</label><input class="fi" type="number" id="ctb-amt" min="0" step="0.01" placeholder="0.00" style="width:100%"></div>
+          <div class="fr"><label class="fl">Source / Description</label><input class="fi" type="text" id="ctb-desc" placeholder="e.g. Owner contribution, Partner deposit…" style="width:100%"></div>
+          <div class="fr"><label class="fl">Received from</label>
+            <select class="fi" id="ctb-from" style="width:100%;background:var(--bg2)">
+              <option value="">— Select —</option>
+              ${db.partners.map(p=>`<option value="${p.name}">${p.name} (Partner)</option>`).join('')}
+              ${db.users.filter(u=>u.role==='owner'||u.role==='admin').map(u=>`<option value="${u.name}">${u.name} (${u.role})</option>`).join('')}
+              <option value="Other">Other / External</option>
+            </select>
+          </div>
+          <div class="fr"><label class="fl">Date</label><input class="fi" type="date" id="ctb-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%"></div>
+          <div class="fr"><label class="fl">Note (optional)</label><input class="fi" type="text" id="ctb-note" placeholder="Reference note…" style="width:100%"></div>
+          <button class="btn btn-green" style="justify-content:center;padding:9px" onclick="saveCashContribution()">
+            <i class="ti ti-check"></i>Record Cash In
+          </button>
+        </div>
+      </div>
+      <!-- History -->
+      <div class="card">
+        <div class="ch"><span><i class="ti ti-history" style="color:var(--t2);margin-right:6px"></i>Contribution History</span></div>
+        <table>
+          <thead><tr>
+            <th style="width:85px">Date</th><th>From</th><th style="width:100px">Amount</th><th style="width:38px"></th>
+          </tr></thead>
+          <tbody>${contribs.length===0
+            ?'<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--t2)">No contributions yet</td></tr>'
+            :contribs.slice().reverse().map(c=>`<tr>
+              <td style="color:var(--t2);font-size:11.5px">${c.date}</td>
+              <td><div style="font-weight:500">${c.from||'—'}</div><div style="font-size:10.5px;color:var(--t2)">${c.note||''}</div></td>
+              <td style="color:var(--green);font-weight:700">${cur}${c.amount.toFixed(2)}</td>
+              <td><button class="icon-btn del" onclick="deleteContribution('${c.id}')"><i class="ti ti-trash" style="font-size:11px"></i></button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function saveCashContribution(){
+  const amt=parseFloat(document.getElementById('ctb-amt')?.value)||0;
+  const desc=(document.getElementById('ctb-desc')?.value||'').trim()||'Cash contribution';
+  const from=document.getElementById('ctb-from')?.value||'';
+  const date=document.getElementById('ctb-date')?.value||new Date().toISOString().slice(0,10);
+  const note=document.getElementById('ctb-note')?.value||'';
+  if(!amt){showToast('⚠ Enter an amount');return;}
+  if(!db.cash.contributions)db.cash.contributions=[];
+  const cid='CTB-'+String(db.counters.cash++).padStart(4,'0');
+  db.cash.contributions.push({id:cid,date,amount:amt,from,desc,note});
+  db.cash.ledger.push({id:'CL-'+Date.now(),date,type:'in',src:'contribution',
+    ref:cid,desc:desc+(from?' — '+from:''),amount:amt,balance:0});
+  db.cash.balance=+(db.cash.balance+amt).toFixed(2);
+  recalcCashBalances();
+  saveDB();renderCash();showToast('✓ Cash contribution recorded!');
+}
+
+function deleteContribution(id){
+  if(!confirm('Delete this contribution?'))return;
+  db.cash.contributions=db.cash.contributions.filter(c=>c.id!==id);
+  db.cash.ledger=db.cash.ledger.filter(e=>e.ref!==id);
+  recalcCashBalances();
+  saveDB();renderCash();showToast('Contribution deleted');
+}
+
+function renderCashWithdraw(){
+  const cur=db.settings.currency;
+  const withdrawals=db.cash.ledger.filter(e=>e.src==='withdrawal');
+  document.getElementById('cash-tab-body').innerHTML=`
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <!-- New withdrawal -->
+      <div class="card">
+        <div class="ch"><span><i class="ti ti-arrow-bar-up" style="color:var(--purple);margin-right:6px"></i>Record Withdrawal</span></div>
+        <div class="cb" style="display:flex;flex-direction:column;gap:10px">
+          <div class="fr"><label class="fl">Amount (${cur})</label><input class="fi" type="number" id="wd-amt" min="0" step="0.01" placeholder="0.00" style="width:100%"></div>
+          <div class="fr"><label class="fl">Withdrawn by</label>
+            <select class="fi" id="wd-by" style="width:100%;background:var(--bg2)">
+              <option value="">— Select —</option>
+              ${db.partners.map(p=>`<option value="${p.name}">${p.name} (Partner)</option>`).join('')}
+              ${db.users.filter(u=>u.role==='owner'||u.role==='admin').map(u=>`<option value="${u.name}">${u.name} (${u.role})</option>`).join('')}
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="fr"><label class="fl">Purpose / Description</label><input class="fi" type="text" id="wd-desc" placeholder="e.g. Personal draw, Petty cash…" style="width:100%"></div>
+          <div class="fr"><label class="fl">Date</label><input class="fi" type="date" id="wd-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%"></div>
+          <div class="fr"><label class="fl">Note</label><input class="fi" type="text" id="wd-note" placeholder="Optional note…" style="width:100%"></div>
+          <div style="background:var(--amberl);border:1px solid #fde68a;border-radius:var(--radius);padding:8px 12px;font-size:11.5px;color:var(--amber)">
+            <i class="ti ti-alert-triangle" style="font-size:13px;margin-right:4px"></i>
+            Current balance: <strong>${cur}${(db.cash.balance||0).toFixed(2)}</strong>
+          </div>
+          <button class="btn btn-red" style="justify-content:center;padding:9px" onclick="saveCashWithdrawal()">
+            <i class="ti ti-arrow-bar-up"></i>Record Withdrawal
+          </button>
+        </div>
+      </div>
+      <!-- Withdrawal history -->
+      <div class="card">
+        <div class="ch"><span><i class="ti ti-history" style="color:var(--t2);margin-right:6px"></i>Withdrawal History</span></div>
+        <table>
+          <thead><tr>
+            <th style="width:85px">Date</th><th>By / Purpose</th><th style="width:100px">Amount</th><th style="width:38px"></th>
+          </tr></thead>
+          <tbody>${withdrawals.length===0
+            ?'<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--t2)">No withdrawals yet</td></tr>'
+            :withdrawals.slice().reverse().map(w=>`<tr>
+              <td style="color:var(--t2);font-size:11.5px">${w.date}</td>
+              <td><div style="font-weight:500">${w.desc||'—'}</div><div style="font-size:10.5px;color:var(--t2)">${w.note||''}</div></td>
+              <td style="color:var(--red);font-weight:700">${cur}${w.amount.toFixed(2)}</td>
+              <td><button class="icon-btn del" onclick="deleteCashEntry('${w.id}')"><i class="ti ti-trash" style="font-size:11px"></i></button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function saveCashWithdrawal(){
+  const amt=parseFloat(document.getElementById('wd-amt')?.value)||0;
+  const by=document.getElementById('wd-by')?.value||'';
+  const desc=(document.getElementById('wd-desc')?.value||'').trim()||'Withdrawal';
+  const date=document.getElementById('wd-date')?.value||new Date().toISOString().slice(0,10);
+  const note=document.getElementById('wd-note')?.value||'';
+  if(!amt){showToast('⚠ Enter an amount');return;}
+  if(amt>(db.cash.balance||0)){
+    if(!confirm(`Amount exceeds current balance (${db.settings.currency}${(db.cash.balance||0).toFixed(2)}). Continue?`))return;
+  }
+  const wid='WD-'+String(db.counters.cash++).padStart(4,'0');
+  db.cash.ledger.push({id:'CL-'+Date.now(),date,type:'out',src:'withdrawal',
+    ref:wid,desc:desc+(by?' — '+by:''),note,amount:amt,balance:0});
+  db.cash.balance=+(db.cash.balance-amt).toFixed(2);
+  recalcCashBalances();
+  saveDB();renderCash();showToast('✓ Withdrawal recorded!');
+}
+
+function renderCashReport(){
+  const cur=db.settings.currency;
+  const today=new Date().toISOString().slice(0,10);
+  const monthStart=today.slice(0,7)+'-01';
+  const ledger=db.cash.ledger;
+  const mIn=ledger.filter(e=>e.type==='in'&&e.date>=monthStart).reduce((s,e)=>s+e.amount,0);
+  const mOut=ledger.filter(e=>e.type==='out'&&e.date>=monthStart).reduce((s,e)=>s+e.amount,0);
+  const mNet=mIn-mOut;
+  const bySource=(src)=>ledger.filter(e=>e.src===src);
+  const sumAmt=(arr)=>arr.reduce((s,e)=>s+e.amount,0);
+  document.getElementById('cash-tab-body').innerHTML=`
+    <div class="card" id="cash-report-printable">
+      <div class="ch">
+        <span><i class="ti ti-report" style="color:var(--ac);margin-right:6px"></i>Cash Account Statement</span>
+        <button class="btn" onclick="printCashReport()"><i class="ti ti-printer"></i>Print / PDF</button>
+      </div>
+      <div class="cb">
+        <!-- Header -->
+        <div style="text-align:center;margin-bottom:18px;border-bottom:1px solid var(--bd);padding-bottom:14px">
+          <div style="font-size:17px;font-weight:700;color:var(--t1)">${db.settings.storeName||'SwiftPOS'}</div>
+          <div style="font-size:12px;color:var(--t2);margin-top:3px">${db.settings.addr||''}</div>
+          <div style="font-size:13px;font-weight:600;color:var(--ac);margin-top:6px">Cash Account Statement — ${today}</div>
+        </div>
+        <!-- Summary boxes -->
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+          <div style="background:var(--greenl);border-radius:var(--radius);padding:12px;text-align:center">
+            <div style="font-size:11px;color:var(--green);font-weight:600;margin-bottom:4px">CASH IN (Month)</div>
+            <div style="font-size:18px;font-weight:700;color:var(--green)">${cur}${mIn.toFixed(2)}</div>
+          </div>
+          <div style="background:var(--redl);border-radius:var(--radius);padding:12px;text-align:center">
+            <div style="font-size:11px;color:var(--red);font-weight:600;margin-bottom:4px">CASH OUT (Month)</div>
+            <div style="font-size:18px;font-weight:700;color:var(--red)">${cur}${mOut.toFixed(2)}</div>
+          </div>
+          <div style="background:${mNet>=0?'var(--acl)':'var(--redl)'};border-radius:var(--radius);padding:12px;text-align:center">
+            <div style="font-size:11px;color:${mNet>=0?'var(--ac)':'var(--red)'};font-weight:600;margin-bottom:4px">NET (Month)</div>
+            <div style="font-size:18px;font-weight:700;color:${mNet>=0?'var(--ac)':'var(--red)'}">${cur}${mNet.toFixed(2)}</div>
+          </div>
+        </div>
+        <!-- Breakdown by source -->
+        <div style="margin-bottom:16px">
+          <div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:8px;border-bottom:1px solid var(--bd);padding-bottom:4px">Breakdown by Source</div>
+          ${[['sale','Sales (Cash In)','var(--green)','in'],
+             ['contribution','Contributions (Cash In)','var(--ac)','in'],
+             ['purchase','Purchases (Cash Out)','var(--red)','out'],
+             ['expense','Expenses (Cash Out)','var(--orange)','out'],
+             ['withdrawal','Withdrawals (Cash Out)','var(--purple)','out']].map(([src,label,color,type])=>{
+               const entries=bySource(src);
+               const total=sumAmt(entries);
+               if(!total)return '';
+               return`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--bd)">
+                 <div style="display:flex;align-items:center;gap:8px">
+                   <div style="width:8px;height:8px;border-radius:50%;background:${color}"></div>
+                   <span style="font-size:12.5px">${label} (${entries.length} entries)</span>
+                 </div>
+                 <span style="font-weight:700;color:${color}">${type==='in'?'+':'−'}${cur}${total.toFixed(2)}</span>
+               </div>`;}).join('')}
+        </div>
+        <!-- Current balance box -->
+        <div style="background:${(db.cash.balance||0)>=0?'var(--acl)':'var(--redl)'};border-radius:var(--radius-lg);padding:14px 18px;display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <div>
+            <div style="font-size:11px;font-weight:600;color:${(db.cash.balance||0)>=0?'var(--acd)':'var(--red)'};text-transform:uppercase;letter-spacing:.05em">Current Cash Balance</div>
+            <div style="font-size:10.5px;color:var(--t2);margin-top:2px">Opening: ${cur}${(db.cash.openingBalance||0).toFixed(2)} · Entries: ${ledger.length}</div>
+          </div>
+          <div style="font-size:28px;font-weight:700;color:${(db.cash.balance||0)>=0?'var(--ac)':'var(--red)'}">${cur}${(db.cash.balance||0).toFixed(2)}</div>
+        </div>
+        <!-- Full ledger table -->
+        <div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:8px">All Transactions</div>
+        <table style="font-size:11.5px">
+          <thead><tr>
+            <th style="width:88px">Date</th><th>Description</th><th style="width:60px">Source</th>
+            <th style="width:88px">Cash In</th><th style="width:88px">Cash Out</th><th style="width:95px">Balance</th>
+          </tr></thead>
+          <tbody>
+            <tr style="background:var(--bg2)">
+              <td style="color:var(--t2)">—</td>
+              <td style="font-weight:500;color:var(--t2)">Opening Balance</td>
+              <td><span class="badge b-gray">opening</span></td>
+              <td style="color:var(--green);font-weight:600">${cur}${(db.cash.openingBalance||0).toFixed(2)}</td>
+              <td>—</td>
+              <td style="font-weight:700">${cur}${(db.cash.openingBalance||0).toFixed(2)}</td>
+            </tr>
+            ${ledger.map(e=>`<tr>
+              <td style="color:var(--t2)">${e.date}</td>
+              <td style="font-weight:500">${e.desc}</td>
+              <td><span class="badge ${e.src==='sale'?'b-g':e.src==='contribution'?'b-b':e.src==='withdrawal'?'b-p':'b-o'}" style="font-size:10px">${e.src}</span></td>
+              <td style="color:var(--green);font-weight:600">${e.type==='in'?cur+e.amount.toFixed(2):'—'}</td>
+              <td style="color:var(--red);font-weight:600">${e.type==='out'?cur+e.amount.toFixed(2):'—'}</td>
+              <td style="font-weight:700;color:${(e.balance||0)>=0?'var(--ac)':'var(--red)'}">${cur}${(e.balance||0).toFixed(2)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <div style="text-align:center;font-size:11px;color:var(--t3);margin-top:16px;border-top:1px solid var(--bd);padding-top:10px">
+          ${db.settings.receiptFooter||''} · Generated ${today}
+        </div>
+      </div>
+    </div>`;
+}
+
+function printCashReport(){
+  const el=document.getElementById('cash-report-printable');
+  if(!el)return;
+  const w=window.open('','_blank','width=800,height=900');
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <title>Cash Report — ${db.settings.storeName}</title>
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;color:#111;padding:24px}
+      table{width:100%;border-collapse:collapse}
+      th{font-size:10px;font-weight:600;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:left;background:#f9fafb}
+      td{padding:6px 8px;border-bottom:1px solid #f3f4f6;font-size:11.5px}
+      .badge{font-size:10px;padding:2px 6px;border-radius:10px;font-weight:600;display:inline-block}
+      .b-g{background:#dcfce7;color:#15803d}.b-r{background:#fee2e2;color:#b91c1c}
+      .b-b{background:#dbeafe;color:#1d4ed8}.b-p{background:#ede9fe;color:#6d28d9}
+      .b-o{background:#ffedd5;color:#c2410c}.b-gray{background:#f3f4f6;color:#6b7280}
+      @media print{@page{margin:1cm}}
+    </style></head><body>${el.outerHTML}
+    <script>setTimeout(()=>{window.print();window.close();},300)<\/script></body></html>`);
+  w.document.close();
+}
+
+function renderCashSetup(){
+  const cur=db.settings.currency;
+  document.getElementById('cash-tab-body').innerHTML=`
+    <div class="card" style="max-width:480px">
+      <div class="ch"><span><i class="ti ti-settings" style="color:var(--ac);margin-right:6px"></i>Cash Account Setup</span></div>
+      <div class="cb" style="display:flex;flex-direction:column;gap:12px">
+        <div class="fr">
+          <label class="fl">Opening Balance (${cur})</label>
+          <input class="fi" type="number" id="ca-ob" min="0" step="0.01"
+            value="${(db.cash.openingBalance||0).toFixed(2)}" style="width:200px">
+          <div style="font-size:11px;color:var(--t2);margin-top:3px">Cash on hand before this system started. Saved immediately.</div>
+        </div>
+        <button class="btn" style="width:fit-content" onclick="saveCashSetup()">
+          <i class="ti ti-check"></i>Save Opening Balance
+        </button>
+        <div class="sn-sep"></div>
+        <div style="font-size:12.5px;font-weight:500;color:var(--t1);margin-bottom:2px">Current Stats</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          ${[
+            ['Opening Balance',db.settings.currency+(db.cash.openingBalance||0).toFixed(2),'var(--t1)'],
+            ['Total Entries',db.cash.ledger.length,'var(--ac)'],
+            ['Total In',db.settings.currency+db.cash.ledger.filter(e=>e.type==='in').reduce((s,e)=>s+e.amount,0).toFixed(2),'var(--green)'],
+            ['Total Out',db.settings.currency+db.cash.ledger.filter(e=>e.type==='out').reduce((s,e)=>s+e.amount,0).toFixed(2),'var(--red)'],
+            ['Contributions',db.cash.contributions?.length||0,'var(--ac)'],
+            ['Current Balance',db.settings.currency+(db.cash.balance||0).toFixed(2),(db.cash.balance||0)>=0?'var(--green)':'var(--red)'],
+          ].map(([l,v,c])=>`<div style="background:var(--bg2);border-radius:var(--radius);padding:10px">
+            <div style="font-size:10.5px;color:var(--t2);margin-bottom:3px">${l}</div>
+            <div style="font-size:15px;font-weight:600;color:${c}">${v}</div>
+          </div>`).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+
+function saveCashSetup(){
+  const ob=parseFloat(document.getElementById('ca-ob')?.value)||0;
+  db.cash.openingBalance=ob;
+  recalcCashBalances();
+  saveDB();renderCash();showToast('✓ Opening balance saved!');
 }
 
 /* ════════════════════════════════════════════
@@ -2616,6 +3081,8 @@ function showToast(msg){
     if(!db.settings.expBudget){db.settings.expBudget=0;}
     if(!db.settings.taxEnabled && db.settings.taxEnabled!==false) db.settings.taxEnabled=true;
     if(!db.settings.taxName) db.settings.taxName='Tax';
+    if(!db.cash)db.cash={balance:0,openingBalance:0,ledger:[],contributions:[]};
+    if(!db.counters.cash)db.counters.cash=1;
     db.items.forEach(it=>{if(!it.unit)it.unit='pcs';if(!it.wsUnit)it.wsUnit='box';if(!it.wsQty)it.wsQty=1;if(!it.wsPrice)it.wsPrice=it.cost;});
     db.partners.forEach(p=>{if(!p.withdrawals)p.withdrawals=[];if(p.availableBalance===undefined)p.availableBalance=0;});
     db.users.forEach(u=>{if(!u.pinHash)u.pinHash=simpleHash(DEFAULT_PINS[u.role]||'1234');});
